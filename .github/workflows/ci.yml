@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write # lets GITHUB_TOKEN push to GHCR, so no registry password is stored anywhere
+
+jobs:
+  quality:
+    name: lint-test-sonar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # SonarQube needs full history
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Dependency audit (fails on high/critical in production packages)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: SonarQube Cloud scan and quality gate
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: -Dsonar.qualitygate.wait=true # fails this step if the quality gate fails
+
+  image:
+    name: build-scan-push
+    needs: quality # only build an image once quality checks have passed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set image name and tag
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zuriapp-backend" >> "$GITHUB_ENV"
+          echo "TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Build image
+        run: docker build -t "$IMAGE:$TAG" .
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (pinned to a commit, see README)
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1" # fail the build on a fixable HIGH or CRITICAL
+      - name: Push to GHCR (main branch only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:$TAG" "$IMAGE:latest"
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
