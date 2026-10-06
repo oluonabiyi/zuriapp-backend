@@ -4,9 +4,10 @@ WORKDIR /app
 
 # Copy dependency files first so this layer is cached until they change
 COPY package.json package-lock.json ./
-# Install production deps only, then remove npm itself: the app runs with plain "node",
-# and npm's own bundled packages are a common source of Trivy findings
-RUN npm ci --omit=dev && npm cache clean --force \
+# Production deps only, with install scripts disabled (no third-party code runs at install time).
+# Then remove npm itself: the app runs with plain "node", and npm's bundled packages
+# are a common source of scanner findings.
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Copy the app code, owned by the non-root "node" user
