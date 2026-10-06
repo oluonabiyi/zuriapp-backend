@@ -6,9 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: read-only by default; only the job that pushes images gets write access
 permissions:
   contents: read
-  packages: write # lets GITHUB_TOKEN push to GHCR, so no registry password is stored anywhere
 
 jobs:
   quality:
@@ -22,15 +22,18 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (no install scripts)
+        run: npm ci --ignore-scripts
       - name: Dependency audit (fails on high/critical in production packages)
         run: npm audit --omit=dev --audit-level=high
       - name: Lint
         run: npm run lint
       - name: Test
         run: npm test
+      # SonarQube Cloud's free plan only returns quality-gate results for the main branch,
+      # so the scan and gate run on pushes to main. Paid plans or self-hosted SonarQube can also gate PRs.
       - name: SonarQube Cloud scan and quality gate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -42,6 +45,9 @@ jobs:
     name: build-scan-push
     needs: quality # only build an image once quality checks have passed
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # only this job may push to GHCR
     steps:
       - uses: actions/checkout@v5
       - name: Set image name and tag
@@ -51,7 +57,7 @@ jobs:
       - name: Build image
         run: docker build -t "$IMAGE:$TAG" .
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (pinned to a commit, see README)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (pinned to a commit)
         with:
           image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
           severity: CRITICAL,HIGH
@@ -59,8 +65,12 @@ jobs:
           exit-code: "1" # fail the build on a fixable HIGH or CRITICAL
       - name: Push to GHCR (main branch only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          # Passed as environment variables, never expanded inside the script itself
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
           docker tag "$IMAGE:$TAG" "$IMAGE:latest"
           docker push "$IMAGE:$TAG"
           docker push "$IMAGE:latest"
